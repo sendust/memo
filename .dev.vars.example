@@ -1,0 +1,6 @@
+# 로컬 개발용 시크릿 예시 (npx wrangler dev)
+# 이 파일을 .dev.vars 로 복사한 뒤 값을 채우세요. .dev.vars 는 git 에 올라가지 않습니다.
+BOT_TOKEN=123456789:AAH-your-main-bot-token
+PIN=1234
+AUTHBOT_TOKEN=987654321:AAH-your-auth-bot-token
+# SESSION_SECRET=아무-긴-임의-문자열
