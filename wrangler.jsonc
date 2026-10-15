@@ -1,0 +1,39 @@
+// Cloudflare Wrangler 설정 예시 (wrangler deploy 로 배포할 때 사용)
+// 대시보드에서만 관리한다면 이 파일은 참고용입니다.
+// <...> 로 표시된 값은 본인 계정의 값으로 바꾸세요.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "memo",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-12",
+  "workers_dev": true,
+  "preview_urls": true,
+
+  // 일반 변수 (비밀이 아닌 값)
+  "vars": {
+    "KEEP_PER_CHAT": "20",          // 봇·대화방마다 서버에 남길 메시지 수 (1~1000)
+    "ONETIME_SESSION_SEC": "60",    // 텔레그램 승인 로그인: 승인 대기 시간 = 세션 유지 시간 (초)
+    "AUTH_CHAT_ID": "<허가할 텔레그램 사용자 ID>"
+  },
+
+  // PIN 실패 횟수 / IP 차단 / 승인 요청 횟수 제한
+  "kv_namespaces": [
+    { "binding": "BANS", "id": "<KV namespace ID>" }
+  ],
+
+  // 메시지 기록, 추가 봇 목록, 승인 요청 (테이블은 첫 요청 때 자동 생성)
+  "d1_databases": [
+    { "binding": "DB", "database_name": "memo-db", "database_id": "<D1 database ID>" }
+  ],
+
+  // (선택) 비로그인 요청 속도 제한 – 값은 예시
+  "ratelimits": [
+    { "name": "RL", "namespace_id": "1001", "simple": { "limit": 100, "period": 60 } }
+  ]
+
+  // 시크릿은 이 파일에 넣지 말고 아래 명령으로 등록하세요.
+  //   npx wrangler secret put BOT_TOKEN
+  //   npx wrangler secret put PIN
+  //   npx wrangler secret put AUTHBOT_TOKEN
+  //   npx wrangler secret put SESSION_SECRET   (선택)
+}
