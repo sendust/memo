@@ -710,7 +710,7 @@ form.send #at{background:var(--panel2);color:var(--txt);padding:10px 12px}
   <div id="log"><div class="empty">봇이 받은 메시지가 여기 표시됩니다.<br>그룹/개인 대화에서 봇에게 메시지를 보내면 목록에 나타납니다.</div></div>
   <div id="ups"></div>
   <div id="cnt" hidden></div>
-  <form class="send" id="sf"><button type="button" id="at" title="파일 첨부 (끌어다 놓기·붙여넣기 가능)" disabled>📎</button><button type="button" id="og" aria-pressed="false">🖼️</button><input type="file" id="fi" multiple hidden>
+  <form class="send" id="sf"><button type="button" id="at" title="파일 첨부 (끌어다 놓기·붙여넣기 가능)" disabled>📁</button><button type="button" id="og" aria-pressed="false">🖼️</button><input type="file" id="fi" multiple hidden>
    <textarea id="tx" placeholder="메시지 입력 (Enter 전송, Shift+Enter 줄바꿈) · 파일은 끌어다 놓기" disabled></textarea><button type="button" id="ex" title="입력창 크게 (여러 줄 입력)" aria-pressed="false"></button><button id="sb" disabled>전송</button></form>
  </section>
 </div>
