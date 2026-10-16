@@ -693,7 +693,7 @@ const APP_HTML = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><me
 .dlg #bOk{text-align:center}.dlg .err{color:var(--err);font-size:13px;min-height:18px}
 .empty{margin:auto;color:var(--muted);text-align:center;padding:20px}
 form.send{display:flex;gap:8px;padding:10px;background:var(--panel)}
-form.send{align-items:flex-end}form.send textarea{flex:1;resize:none;height:44px;max-height:140px}form.send.big textarea{height:45vh;max-height:none;resize:vertical}form.send #ex{flex:none;width:44px;height:44px;padding:0;display:flex;align-items:center;justify-content:center;background:var(--panel2);color:var(--txt)}form.send #ex svg{width:22px;height:22px}form.send.big #ex{background:var(--acc);color:#fff}form.send #at,form.send #sb{height:44px}
+form.send{align-items:flex-end}form.send textarea{flex:1;resize:none;height:44px;max-height:140px}form.send.big textarea{height:45vh;max-height:none;resize:vertical}form.send #ex{flex:none;width:44px;height:44px;padding:0;display:flex;align-items:center;justify-content:center;background:var(--panel2);color:var(--txt)}form.send #ex svg{width:22px;height:22px}form.send.big #ex{background:var(--acc);color:#fff}form.send #at,form.send #sb{height:44px}form.send #og{flex:none;width:44px;height:44px;padding:0;background:var(--panel2);color:var(--txt);font-size:18px}form.send #og.on{background:var(--acc);color:#fff}
 form.send #at{background:var(--panel2);color:var(--txt);padding:10px 12px}
 #st{padding:0 16px 10px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--panel2)}
 .side h2 button{padding:6px 12px;font-size:13px;flex:none}
@@ -710,7 +710,7 @@ form.send #at{background:var(--panel2);color:var(--txt);padding:10px 12px}
   <div id="log"><div class="empty">봇이 받은 메시지가 여기 표시됩니다.<br>그룹/개인 대화에서 봇에게 메시지를 보내면 목록에 나타납니다.</div></div>
   <div id="ups"></div>
   <div id="cnt" hidden></div>
-  <form class="send" id="sf"><button type="button" id="at" title="파일 첨부 (끌어다 놓기·붙여넣기 가능)" disabled>📎</button><input type="file" id="fi" multiple hidden>
+  <form class="send" id="sf"><button type="button" id="at" title="파일 첨부 (끌어다 놓기·붙여넣기 가능)" disabled>📎</button><button type="button" id="og" aria-pressed="false">🖼️</button><input type="file" id="fi" multiple hidden>
    <textarea id="tx" placeholder="메시지 입력 (Enter 전송, Shift+Enter 줄바꿈) · 파일은 끌어다 놓기" disabled></textarea><button type="button" id="ex" title="입력창 크게 (여러 줄 입력)" aria-pressed="false"></button><button id="sb" disabled>전송</button></form>
  </section>
 </div>
@@ -934,7 +934,7 @@ function xhrUpload(file,caption,kind,ui){
 async function upload(file,caption,ui){
  if(file.size>50*MB){ui.remove();alert(file.name+': 50MB를 넘는 파일은 봇으로 보낼 수 없습니다.');return false}
  if(!file.size){ui.remove();alert(file.name+': 빈 파일이거나 폴더입니다.');return false}
- const isImg=/^image\\/(jpeg|png|webp)$/.test(file.type)&&file.size<=10*MB;
+ const isImg=!ORIG&&/^image\\/(jpeg|png|webp)$/.test(file.type)&&file.size<=10*MB;if(ORIG&&/^image\\//.test(file.type))ui.label('⬆ '+file.name+' (원본 파일)');
  uploading++;
  try{
   let j=await xhrUpload(file,caption,isImg?'photo':'document',ui);
@@ -952,7 +952,7 @@ async function sendFiles(list){
  uploading++;
  try{for(let i=0;i<files.length;i++){await upload(files[i],cap,rows[i]);cap=''}}finally{uploading--}
 }
-$('at').onclick=()=>$('fi').click();
+let ORIG=false;try{ORIG=localStorage.getItem('tgw_orig')==='1'}catch(e){}function setOrig(on,say){ORIG=on;const b=$('og');b.textContent=on?'💾':'🖼️';b.classList.toggle('on',on);b.setAttribute('aria-pressed',on?'true':'false');b.title=on?'이미지 전송: 원본 파일 (압축 없음) · 누르면 사진으로 전환':'이미지 전송: 사진 (텔레그램이 압축) · 누르면 원본 파일로 전환';try{localStorage.setItem('tgw_orig',on?'1':'')}catch(e){}if(say)$('st').textContent=on?'💾 이미지를 원본 파일로 보냅니다 (압축 없음)':'🖼️ 이미지를 사진으로 보냅니다 (텔레그램이 압축)'}setOrig(ORIG,false);$('og').onclick=()=>setOrig(!ORIG,true);$('at').onclick=()=>$('fi').click();
 $('fi').onchange=()=>{sendFiles($('fi').files);$('fi').value=''};
 $('tx').addEventListener('paste',e=>{const fs=e.clipboardData&&e.clipboardData.files;if(fs&&fs.length){e.preventDefault();sendFiles(fs)}});
 let dragN=0;const main=$('main');
@@ -965,7 +965,7 @@ main.addEventListener('drop',e=>{e.preventDefault();dragN=0;main.classList.remov
 
 // ---------- 텍스트 전송 (4,096자 초과 시 분할/파일 선택) ----------
 const LIMIT=4096;
-function upd(){const tx=$('tx');if(!$('sf').classList.contains('big')){tx.style.height='44px';tx.style.height=Math.min(tx.scrollHeight+2,140)+'px'}const n=tx.value.length,c=$('cnt');
+function upd(){const tx=$('tx');if(!$('sf').classList.contains('big')){tx.style.height='44px';tx.style.height=tx.value?Math.max(44,Math.min(tx.scrollHeight+2,140))+'px':'44px'}const n=tx.value.length,c=$('cnt');
  if(n>3500){c.hidden=false;c.textContent=n.toLocaleString()+' / 4,096자'+(n>LIMIT?' · 전송 시 분할 또는 파일 전송을 선택합니다':'');c.classList.toggle('over',n>LIMIT)}else c.hidden=true}
 $('tx').addEventListener('input',upd);
 function splitText(t){
