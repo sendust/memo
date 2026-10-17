@@ -546,6 +546,224 @@ async function handleFile(url, env) {
   return new Response(fr.body, { status: 200, headers: h });
 }
 
+// ---------- CLI (터미널용: bash <(curl -s https://<worker>/cli)) ----------
+// 기본 봇(BOT_TOKEN) ↔ AUTH_CHAT_ID 대화방만 사용. 웹 쿠키 세션과 별개인 Bearer 토큰(kind c) 사용
+const CLI_TTL = 12 * 3600;
+const cliText = (s, status = 200) => new Response(s + "\n", { status, headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+async function cliAuthed(env, req) {
+  const m = (req.headers.get("Authorization") || "").match(/^Bearer (\d+)\.c\.([0-9a-f]{64})$/);
+  if (!m || !env.BOT_TOKEN || !env.PIN || Number(m[1]) < Date.now() / 1000) return false;
+  return safeEq(m[2], await hmacHex(env, "c:" + m[1]));
+}
+// PIN 확인 (웹 로그인과 같은 실패 횟수 / IP 차단 키 사용)
+async function cliLogin(req, env, ip) {
+  const banKey = `ban:${ip}`, failKey = `fail:${ip}`;
+  const now = Math.floor(Date.now() / 1000);
+  const banUntil = Number(await kvGet(env, banKey) || 0);
+  if (banUntil > now) return cliText(`Blocked: try again in ${banUntil - now}s`, 429);
+  if (!env.PIN || !env.BOT_TOKEN) return cliText("Server not configured (BOT_TOKEN/PIN)", 500);
+  const pin = (await req.text().catch(() => "")).slice(0, 200).trim();
+  if (safeEq(await hmacHex(env, "p:" + pin), await hmacHex(env, "p:" + String(env.PIN)))) {
+    await kvDel(env, failKey);
+    const exp = now + CLI_TTL;
+    return cliText(`${exp}.c.${await hmacHex(env, "c:" + exp)}`);
+  }
+  const fails = Number(await kvGet(env, failKey) || 0) + 1;
+  if (fails >= MAX_FAIL) {
+    await kvPut(env, banKey, String(now + BAN_SEC), BAN_SEC);
+    await kvDel(env, failKey);
+    return cliText(`Wrong PIN ${MAX_FAIL} times: blocked for ${BAN_SEC}s`, 429);
+  }
+  await kvPut(env, failKey, String(fails), BAN_SEC);
+  return cliText(`Wrong PIN (${MAX_FAIL - fails} attempts left)`, 401);
+}
+// 긴 글/파일 → sendDocument (본문을 메모리에 모으지 않고 multipart 로 감싸 스트리밍)
+async function cliSendDoc(env, chat, name, body, len) {
+  const bd = "----memocli" + randHex(12);
+  const safe = name.replace(/[\r\n"\\]/g, "_").slice(0, 200) || "file.bin";
+  const head = enc.encode(`--${bd}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chat}\r\n--${bd}\r\nContent-Disposition: form-data; name="document"; filename="${safe}"\r\nContent-Type: application/octet-stream\r\n\r\n`);
+  const tail = enc.encode(`\r\n--${bd}--\r\n`);
+  const { readable, writable } = typeof FixedLengthStream === "function" ? new FixedLengthStream(head.length + len + tail.length) : new TransformStream();
+  (async () => {
+    const w = writable.getWriter();
+    try {
+      await w.write(head);
+      if (body instanceof Uint8Array) await w.write(body);
+      else { const r = body.getReader(); for (;;) { const { done, value } = await r.read(); if (done) break; await w.write(value); } }
+      await w.write(tail); await w.close();
+    } catch (e) { try { await w.abort(e); } catch { } }
+  })();
+  const r = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, {
+    method: "POST", headers: { "Content-Type": `multipart/form-data; boundary=${bd}` }, body: readable,
+  });
+  return r.json().catch(() => ({ ok: false, description: "HTTP " + r.status }));
+}
+async function cliSaved(env, r) {
+  if (!r.ok) return cliText("Failed: " + (r.description || "unknown error"), 502);
+  const msg = slimMsg(r.result, false);
+  msg.mine = true;
+  await dbSave(env, "main", [msg]);
+  return cliText("ok");
+}
+async function cliInbox(env) {
+  const chat = authChat(env);
+  const r = await tg(env.BOT_TOKEN, "getUpdates", {
+    timeout: 0, limit: 100,
+    allowed_updates: ["message", "edited_message", "channel_post", "edited_channel_post", "my_chat_member"],
+  });
+  if (!r.ok) return cliText("Failed: " + r.description + (r.error_code === 409 ? " (another client is fetching at the same time, retry shortly)" : ""), 502);
+  const out = [];
+  let last = 0;
+  for (const u of r.result) {
+    last = Math.max(last, u.update_id);
+    const m = u.message || u.channel_post, em = u.edited_message || u.edited_channel_post;
+    if (m) out.push(slimMsg(m, false));
+    else if (em) out.push(slimMsg(em, true));
+    else if (u.my_chat_member) {
+      const c = u.my_chat_member.chat;
+      out.push({ message_id: 0, date: u.my_chat_member.date, system: true,
+        chat: { id: c.id, type: c.type, title: c.title || nameOf(c) },
+        from: { name: "system" }, text: `봇 상태 변경: ${u.my_chat_member.new_chat_member.status}` });
+    }
+  }
+  // 웹과 같은 방식으로 전부 D1 에 저장 → 웹(PIN 로그인)에서 기록으로 보임
+  await dbSave(env, "main", out);
+  if (last) await tg(env.BOT_TOKEN, "getUpdates", { offset: last + 1, timeout: 0, limit: 1 });
+  const lines = [];
+  let other = 0, hasFile = false;
+  for (const m of out) {
+    if (String(m.chat.id) !== chat) { other++; continue; }
+    let s = "< " + (m.edited ? "(edited) " : "") + (m.text || "").replace(/\n/g, "\n  ");
+    if (m.file) { s += (m.text ? "\n  " : "") + `[${m.file.kind}] ${m.file.name} ${cliSize(m.file.size)}`; hasFile = true; }
+    lines.push(s);
+  }
+  if (!lines.length) lines.push("  (no new messages)");
+  if (other) lines.push(`  (${other} message(s) from other chats: see the web UI)`);
+  if (hasFile) lines.push("#FILES");   // 클라이언트가 이 줄을 보면 파일 목록을 자동 표시
+  return cliText(lines.join("\n"));
+}
+const cliSize = (n) => n >= 1048576 ? (n / 1048576).toFixed(1) + "MB" : n >= 1024 ? Math.round(n / 1024) + "KB" : (n || 0) + "B";
+const cliName = (s) => String(s || "file").replace(/[\x00-\x1f\x7f\/\\:*?"<>|]/g, "_").replace(/^[.\-\s]+/, "").slice(0, 150) || "file";
+// 파일 목록: D1 에 저장된 내 대화방(AUTH_CHAT_ID) 메시지 중 파일만 (오래된 것 → 최신). 줄 형식: 행id \t 종류 \t 이름 \t 크기 \t 방향 \t 시각
+async function cliFiles(env, chat) {
+  if (!env.DB) return cliText("D1 (DB) binding missing: file list unavailable", 500);
+  await dbInit(env);
+  const { results } = await env.DB.prepare("SELECT id, data FROM messages WHERE bot = 'main' AND chat_id = ? AND json_extract(data, '$.file.id') IS NOT NULL ORDER BY id DESC LIMIT 30").bind(chat).all();
+  const rows = results.reverse().map((r) => {
+    const m = JSON.parse(r.data), f = m.file;
+    const d = new Date(((m.date || 0) + 9 * 3600) * 1000), z = (n) => String(n).padStart(2, "0");   // 한국 시간
+    const t = `${z(d.getUTCMonth() + 1)}/${z(d.getUTCDate())} ${z(d.getUTCHours())}:${z(d.getUTCMinutes())}`;
+    return [r.id, f.kind, cliName(f.name), cliSize(f.size), m.mine ? "sent" : "recv", t].join("\t");
+  });
+  return cliText(rows.join("\n"));
+}
+async function cliDl(url, env, chat) {
+  const row = url.searchParams.get("row") || "";
+  if (!env.DB || !/^\d{1,15}$/.test(row)) return cliText("bad row", 400);
+  await dbInit(env);
+  const r = await env.DB.prepare("SELECT data FROM messages WHERE id = ? AND bot = 'main' AND chat_id = ?").bind(Number(row), chat).first();
+  const f = r && JSON.parse(r.data).file;
+  if (!f || !f.id) return cliText("File not found", 404);
+  const u = new URL(url.origin + "/x");
+  u.searchParams.set("id", f.id); u.searchParams.set("name", cliName(f.name));
+  return handleFile(u, env);
+}
+async function handleCli(req, env, ip, url) {
+  const p = url.pathname;
+  if (p === "/cli" && req.method === "GET")
+    return new Response(CLI_SH.replace("__ORIGIN__", url.origin), { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+  if (p === "/cli/api/login" && req.method === "POST") return cliLogin(req, env, ip);
+  if (!(await cliAuthed(env, req))) return cliText("Unauthorized (log in again)", 401);
+  const chat = authChat(env);
+  if (!/^-?\d+$/.test(chat)) return cliText("Server not configured (AUTH_CHAT_ID)", 500);
+  if (p === "/cli/api/ping" && req.method === "GET") return cliText("ok");
+  if (p === "/cli/api/inbox" && req.method === "GET") return cliInbox(env);
+  if (p === "/cli/api/files" && req.method === "GET") return cliFiles(env, chat);
+  if (p === "/cli/api/dl" && req.method === "GET") return cliDl(url, env, chat);
+  if (p === "/cli/api/send" && req.method === "POST") {
+    const len = Number(req.headers.get("Content-Length") || 0);
+    if (len > MAX_UP) return cliText("Too large (max 50MB)", 413);
+    const raw = new Uint8Array(await req.arrayBuffer());
+    const text = new TextDecoder().decode(raw).replace(/\r\n?/g, "\n").trim();
+    if (!text) return cliText("Empty message", 400);
+    if (text.length <= 4096) return cliSaved(env, await tg(env.BOT_TOKEN, "sendMessage", { chat_id: Number(chat), text }));
+    const t = enc.encode(text);   // 4096자 초과 → 텍스트 파일로
+    return cliSaved(env, await cliSendDoc(env, chat, `memo_${Math.floor(Date.now() / 1000)}.txt`, t, t.length));
+  }
+  if (p === "/cli/api/sendfile" && req.method === "POST") {
+    const len = Number(req.headers.get("Content-Length") || 0);
+    if (!len || !req.body) return cliText("Content-Length required", 411);
+    if (len > MAX_UP) return cliText("File too large (max 50MB)", 413);
+    return cliSaved(env, await cliSendDoc(env, chat, url.searchParams.get("name") || "file.bin", req.body, len));
+  }
+  return cliText("not found", 404);
+}
+// 클라이언트 스크립트 (비밀값 없음). 주의: 이 안에는 백틱과 달러+중괄호 금지
+const CLI_SH = String.raw`#!/usr/bin/env bash
+# memo CLI - type text + Enter to send, /h for help
+W="__ORIGIN__"
+command -v curl >/dev/null || { echo "curl is required"; exit 1; }
+if [ -z "$TG_PIN" ]; then read -rsp "PIN: " TG_PIN </dev/tty; echo; fi
+T=$(printf %s "$TG_PIN" | curl -s -w '\n%{http_code}' --data-binary @- "$W/cli/api/login")
+unset TG_PIN
+C=$(printf %s "$T" | tail -n1); T=$(printf %s "$T" | sed '$d')
+[ "$C" = 200 ] || { echo "Login failed: $T"; exit 1; }
+H="Authorization: Bearer $T"
+ue()   { printf %s "$1" | od -An -tx1 -v | tr -d ' \n' | sed 's/../%&/g'; }
+post() { r=$(curl -s -w '\n%{http_code}' -H "$H" "$@"); c=$(printf %s "$r" | tail -n1); b=$(printf %s "$r" | sed '$d'); }
+ok()   { if [ "$c" = 200 ]; then echo "  ✓ $1"; elif [ "$c" = 401 ]; then echo "  ✗ Session expired: run the script again"; else echo "  ✗ $c $b"; fi; }
+# file list: FL holds "no<TAB>rowid<TAB>name" lines ($1=q: quiet)
+flist() {
+  post "$W/cli/api/files"; [ "$c" = 200 ] || { ok; return 1; }
+  FL=""; i=0
+  while IFS=$'\t' read -r id kind nm sz dir t; do
+    [ -z "$id" ] && continue
+    i=$((i+1)); FL+="$i"$'\t'"$id"$'\t'"$nm"$'\n'
+    [ "$1" = q ] || printf '  %2d) %s %s %6s  %s  [%s]\n' "$i" "$t" "$dir" "$sz" "$nm" "$kind"
+  done <<<"$b"
+  [ "$1" = q ] || { [ $i = 0 ] && echo "  (no files)" || echo "  Download: /d no [no...]"; }
+}
+dl() {
+  [ -z "$FL" ] && flist q
+  for n in "$@"; do
+    id=$(printf %s "$FL" | awk -F'\t' -v n="$n" '$1==n{print $2}')
+    nm=$(printf %s "$FL" | awk -F'\t' -v n="$n" '$1==n{print $3}')
+    if [ -z "$id" ]; then echo "  ✗ No such number: $n (see /l)"; continue; fi
+    out=$nm; k=1
+    while [ -e "$out" ]; do out="$k"_"$nm"; k=$((k+1)); done
+    if curl -sf -H "$H" -o "$out" "$W/cli/api/dl?row=$id"; then echo "  ✓ Saved: $(pwd)/$out ($(wc -c <"$out" | tr -d ' ')B)"
+    else rm -f "$out"; echo "  ✗ Download failed: $n"; fi
+  done
+}
+help() {
+  echo "text+Enter: send | /m: multi-line | /r: receive | /f path: send file"
+  echo "/l: file list | /d no [no...]: download | /h: help | /q: quit"
+}
+echo "Connected: $W"; help
+while IFS= read -rep "> " line </dev/tty; do
+  read -r cmd a b2 <<<"$line"
+  case "$cmd" in
+    "") ;;
+    /q) break ;;
+    /h) help ;;
+    /r) post "$W/cli/api/inbox"
+        if [ "$c" = 200 ]; then printf '%s\n' "$b" | grep -v '^#FILES$'; printf '%s\n' "$b" | grep -q '^#FILES$' && flist
+        else ok; fi ;;
+    /l) flist ;;
+    /m) echo "  Paste/type lines, then Ctrl+D on a new line"
+        msg=$(cat </dev/tty | tr -d '\r')
+        if [ -z "$msg" ]; then echo "  (cancelled)"
+        else post --data-binary @- "$W/cli/api/send" <<<"$msg"; ok "Sent"; fi ;;
+    /f) f=$(printf %s "$line" | sed 's/^\/f[[:space:]]*//')
+        if [ -f "$f" ]; then post -H "Content-Type: application/octet-stream" --data-binary @"$f" "$W/cli/api/sendfile?name=$(ue "$(basename "$f")")"; ok "File sent"
+        else echo "  File not found: $f"; fi ;;
+    /d) if [ -z "$a" ]; then flist; else dl $(printf %s "$line" | sed 's/^\/d//'); fi ;;
+    *)  if [[ "$line" =~ ^[dlrfmhq]([[:space:]][0-9[:space:]]*)?$ ]]; then echo "  Not sent. Did you mean /$line ? (commands start with /)"
+        else post --data-binary @- "$W/cli/api/send" <<<"$line"; ok "Sent"; fi ;;
+  esac
+done
+`;
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -568,6 +786,8 @@ export default {
     const p = url.pathname;
     if (p === "/favicon.ico" || p === "/robots.txt")
       return new Response(p === "/robots.txt" ? "User-agent: *\nDisallow: /\n" : null, { status: p === "/robots.txt" ? 200 : 204 });
+
+    if (p === "/cli" || p.startsWith("/cli/")) return handleCli(req, env, ip, url);   // 터미널용 CLI (Bearer 토큰, 웹 세션과 별개)
 
     if (p === "/api/login" && req.method === "POST") return handleLogin(req, env, ip); if (p === "/api/auth/request" && req.method === "POST") return handleAuthRequest(req, env, ip, url); if (p === "/api/auth/status" && req.method === "GET") return handleAuthStatus(url, env); if (p === "/api/authhook" && req.method === "POST") return handleAuthHook(req, env);
 
