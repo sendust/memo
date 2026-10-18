@@ -792,6 +792,9 @@ export default {
     if (p === "/api/login" && req.method === "POST") return handleLogin(req, env, ip); if (p === "/api/auth/request" && req.method === "POST") return handleAuthRequest(req, env, ip, url); if (p === "/api/auth/status" && req.method === "GET") return handleAuthStatus(url, env); if (p === "/api/authhook" && req.method === "POST") return handleAuthHook(req, env);
 
     if (p === "/" && req.method === "GET") {
+      // 터미널(curl/wget)로 첫 화면을 열면 HTML 대신 CLI 사용법 (| bash 로 넘겨도 사용법만 출력)
+      if (/^(curl|wget|httpie|xh)\//i.test(req.headers.get("User-Agent") || ""))
+        return new Response(`# memo CLI: curl -s ${url.origin}/cli | bash\necho "memo CLI: curl -s ${url.origin}/cli | bash"\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
       if (authed) return html(APP_HTML);
       const banUntil = Number(await kvGet(env, `ban:${ip}`) || 0);
       return html(LOGIN_HTML, banUntil > Date.now() / 1000 ? 429 : 200);
