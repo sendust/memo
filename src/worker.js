@@ -737,7 +737,7 @@ dl() {
 }
 help() {
   echo "text+Enter: send | /m: multi-line | /r: receive | /f path: send file"
-  echo "/l: file list | /d no [no...]: download | /h: help | /q: quit"
+  echo "/l: file list | /d no [no...]: download | /pwd: current folder | /h: help | /q: quit"
 }
 echo "Connected: $W"; help
 while IFS= read -rep "> " line </dev/tty; do
@@ -750,13 +750,17 @@ while IFS= read -rep "> " line </dev/tty; do
         if [ "$c" = 200 ]; then printf '%s\n' "$b" | grep -v '^#FILES$'; printf '%s\n' "$b" | grep -q '^#FILES$' && flist
         else ok; fi ;;
     /l) flist ;;
+    /pwd) echo "  $(pwd)" ;;
     /m) echo "  Paste/type lines, then Ctrl+D on a new line"
         msg=$(cat </dev/tty | tr -d '\r')
         if [ -z "$msg" ]; then echo "  (cancelled)"
         else post --data-binary @- "$W/cli/api/send" <<<"$msg"; ok "Sent"; fi ;;
-    /f) f=$(printf %s "$line" | sed 's/^\/f[[:space:]]*//')
-        if [ -f "$f" ]; then post -H "Content-Type: application/octet-stream" --data-binary @"$f" "$W/cli/api/sendfile?name=$(ue "$(basename "$f")")"; ok "File sent"
-        else echo "  File not found: $f"; fi ;;
+    /f) f=$(printf %s "$line" | sed -e 's/^\/f[[:space:]]*//' -e 's/[[:space:]]*$//' -e "s/^'\(.*\)'$/\1/" -e 's/^"\(.*\)"$/\1/' -e 's/\\ / /g')
+        case "$f" in "~"/*) f="$HOME/$(printf %s "$f" | cut -c3-)" ;; esac
+        if [ -z "$f" ]; then echo "  Usage: /f path"
+        elif [ -f "$f" ] && [ -r "$f" ]; then post -H "Content-Type: application/octet-stream" --data-binary @"$f" "$W/cli/api/sendfile?name=$(ue "$(basename "$f")")"; ok "File sent"
+        elif [ -f "$f" ]; then echo "  Cannot read (permission): '$f'"
+        else echo "  File not found: '$f'"; fi ;;
     /d) if [ -z "$a" ]; then flist; else dl $(printf %s "$line" | sed 's/^\/d//'); fi ;;
     *)  if [[ "$line" =~ ^[dlrfmhq]([[:space:]][0-9[:space:]]*)?$ ]]; then echo "  Not sent. Did you mean /$line ? (commands start with /)"
         else post --data-binary @- "$W/cli/api/send" <<<"$line"; ok "Sent"; fi ;;
