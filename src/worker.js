@@ -343,7 +343,7 @@ const okAuthId = (id) => typeof id === "string" && id.length === 32 && !/[^0-9a-
 let hookSetFor = "";
 async function hookSecret(env) { return (await hmacHex(env, "authhook")).slice(0, 48); }
 async function ensureAuthHook(env, origin) {
-  const url = origin + "/api/authhook";
+  const url = origin.replace(/^http:/, "https:") + "/api/authhook";   // 텔레그램 웹훅은 https 만 허용
   // 미리보기 주소와 실제 주소를 오갈 수 있으므로 요청마다 웹훅 주소를 현재 주소로 맞춤
   const r = await tg(env.AUTHBOT_TOKEN, "setWebhook", { url, secret_token: await hookSecret(env), allowed_updates: ["callback_query"] });
   if (r.ok) hookSetFor = url;
@@ -771,6 +771,16 @@ done
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+    // 0) http 요청은 https 로 (Secure 쿠키·텔레그램 웹훅 모두 https 필요, PIN 평문 전송 방지)
+    if (url.protocol === "http:") {
+      const to = "https://" + url.host + url.pathname + url.search;
+      if (req.method === "GET" || req.method === "HEAD") {
+        const cli = /^(curl|wget|httpie|xh)\//i.test(req.headers.get("User-Agent") || "");
+        const body = cli ? `# https only: curl -s https://${url.host}/cli | bash\necho "https only: curl -s https://${url.host}/cli | bash"\n` : null;
+        return new Response(body, { status: 301, headers: { Location: to, "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+      }
+      return new Response("https only: " + to + "\n", { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+    }
     const ip = req.headers.get("CF-Connecting-IP") || "0.0.0.0";
     const authed = await validSession(env, req);
 
