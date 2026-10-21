@@ -218,7 +218,7 @@ bash <(curl -s https://memo.<서브도메인>.workers.dev/cli)
 curl -s https://memo.<서브도메인>.workers.dev/cli | bash
 ```
 
-> 💡 주소를 잊었다면 `curl https://memo.<서브도메인>.workers.dev` 처럼 첫 화면 주소로 curl/wget 을 실행하면 HTML 대신 위 사용법이 출력됩니다. (브라우저 접속은 그대로)
+> 💡 주소를 잊었다면 `curl https://memo.<서브도메인>.workers.dev` 처럼 첫 화면 주소로 curl/wget 을 실행하면 HTML 대신 bash·PowerShell 사용법이 함께 출력됩니다. (Windows 의 curl.exe 도 같음, 브라우저 접속은 그대로)
 
 1. `PIN:` 에 PIN을 입력하면 **12시간짜리 CLI 전용 토큰**이 발급됩니다. (웹 세션과 별개)
    - 매번 입력하기 싫으면 `TG_PIN=1234 bash <(curl -s .../cli)` 처럼 환경변수로 줄 수 있습니다.
