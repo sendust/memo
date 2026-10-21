@@ -934,7 +934,7 @@ export default {
       const to = "https://" + url.host + url.pathname + url.search;
       if (req.method === "GET" || req.method === "HEAD") {
         const cli = /^(curl|wget|httpie|xh)\//i.test(req.headers.get("User-Agent") || "");
-        const body = cli ? `# https only: curl -s https://${url.host}/cli | bash\necho "https only: curl -s https://${url.host}/cli | bash"\n` : null;
+        const body = cli ? `# https only\n#   bash (Linux/macOS):   curl -s https://${url.host}/cli | bash\n#   PowerShell (Windows): irm https://${url.host}/cliwin | iex\necho "https only - bash: curl -s https://${url.host}/cli | bash  /  PowerShell: irm https://${url.host}/cliwin | iex"\n` : null;
         return new Response(body, { status: 301, headers: { Location: to, "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
       }
       return new Response("https only: " + to + "\n", { status: 403, headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
@@ -966,7 +966,7 @@ export default {
     if (p === "/" && req.method === "GET") {
       // 터미널(curl/wget)로 첫 화면을 열면 HTML 대신 CLI 사용법 (| bash 로 넘겨도 사용법만 출력)
       if (/^(curl|wget|httpie|xh)\//i.test(req.headers.get("User-Agent") || ""))
-        return new Response(`# memo CLI: curl -s ${url.origin}/cli | bash\necho "memo CLI: curl -s ${url.origin}/cli | bash"\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+        return new Response(`# memo CLI\n#   bash (Linux/macOS):   curl -s ${url.origin}/cli | bash\n#   PowerShell (Windows): irm ${url.origin}/cliwin | iex\necho "memo CLI - bash: curl -s ${url.origin}/cli | bash  /  PowerShell: irm ${url.origin}/cliwin | iex"\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
       if (/PowerShell\//i.test(req.headers.get("User-Agent") || ""))   // irm https://<worker> | iex 로 열면 PowerShell 사용법
         return new Response(`# memo CLI (PowerShell): irm ${url.origin}/cliwin | iex\nWrite-Host "memo CLI (PowerShell): irm ${url.origin}/cliwin | iex"\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
       if (authed) return html(APP_HTML);
