@@ -672,6 +672,8 @@ async function handleCli(req, env, ip, url) {
   const p = url.pathname;
   if (p === "/cli" && req.method === "GET")
     return new Response(CLI_SH.replace("__ORIGIN__", url.origin), { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+  if ((p === "/cliwin" || p === "/powershell") && req.method === "GET")   // PowerShell: irm https://<worker>/cliwin | iex
+    return new Response(CLI_PS.replace("__ORIGIN__", url.origin), { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
   if (p === "/cli/api/login" && req.method === "POST") return cliLogin(req, env, ip);
   if (!(await cliAuthed(env, req))) return cliText("Unauthorized (log in again)", 401);
   const chat = authChat(env);
@@ -767,6 +769,162 @@ while IFS= read -rep "> " line </dev/tty; do
   esac
 done
 `;
+// PowerShell 클라이언트 (Windows PowerShell 5.1 / PowerShell 7). 주의: 이 안에는 백틱과 달러+중괄호 금지 (PowerShell 백틱 이스케이프도 쓰지 않음)
+const CLI_PS = String.raw`# memo CLI for PowerShell - type text + Enter to send, /h for help
+# usage: irm https://<worker>/cliwin | iex   (Windows PowerShell 5.1 / PowerShell 7)
+& {
+$W = '__ORIGIN__'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072 } catch {}
+$NL = [string][char]10
+$TAB = [string][char]9
+$U8 = New-Object Text.UTF8Encoding $false
+$oldEnc = $null
+try { $oldEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = $U8 } catch {}
+$H = @{}
+
+function Call($Method, $Path, $Body, $InFile, $OutFile, $CType) {
+  $p = @{ Uri = $W + $Path; Method = $Method; UseBasicParsing = $true; Headers = $H }
+  if ($null -ne $Body) { $p.Body = $Body }
+  if ($InFile) { $p.InFile = $InFile }
+  if ($OutFile) { $p.OutFile = $OutFile; $p.PassThru = $true }
+  if ($CType) { $p.ContentType = $CType }
+  try {
+    $r = Invoke-WebRequest @p
+    $b = ''
+    if (-not $OutFile) { $b = $U8.GetString($r.RawContentStream.ToArray()) }
+    return @{ c = [int]$r.StatusCode; b = $b.TrimEnd() }
+  } catch {
+    $c = 0; $b = [string]$_.Exception.Message
+    $resp = $_.Exception.Response
+    if ($resp) { try { $c = [int]$resp.StatusCode } catch {} }
+    if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $b = [string]$_.ErrorDetails.Message }
+    elseif ($resp -is [Net.HttpWebResponse]) { try { $sr = New-Object IO.StreamReader($resp.GetResponseStream(), $U8); $b = $sr.ReadToEnd() } catch {} }
+    return @{ c = $c; b = $b.TrimEnd() }
+  }
+}
+function Ok($r, $msg) {
+  if ($r.c -eq 200) { Write-Host ('  [OK] ' + $msg) }
+  elseif ($r.c -eq 401) { Write-Host '  [X] Session expired: run the script again' }
+  elseif ($r.c -eq 0) { Write-Host ('  [X] ' + $r.b) }
+  else { Write-Host ('  [X] ' + $r.c + ' ' + $r.b) }
+}
+function Send-Text($text) {
+  $r = Call 'POST' '/cli/api/send' ($U8.GetBytes($text)) $null $null 'text/plain; charset=utf-8'
+  Ok $r 'Sent'
+}
+function Get-Files($show) {
+  $r = Call 'GET' '/cli/api/files'
+  if ($r.c -ne 200) { Ok $r ''; return ,@() }
+  $list = @(); $i = 0
+  foreach ($ln in ($r.b -split $NL)) {
+    $f = $ln.TrimEnd([char]13) -split $TAB
+    if ($f.Count -lt 6 -or -not $f[0]) { continue }
+    $i++
+    $list += [pscustomobject]@{ n = $i; id = $f[0]; name = $f[2] }
+    if ($show) { Write-Host ('  {0,2}) {1} {2} {3,6}  {4}  [{5}]' -f $i, $f[5], $f[4], $f[3], $f[2], $f[1]) }
+  }
+  if ($show) { if ($i -eq 0) { Write-Host '  (no files)' } else { Write-Host '  Download: /d no [no...]' } }
+  return ,$list
+}
+function Save-Files($list, $nums) {
+  $dir = (Get-Location).ProviderPath
+  foreach ($n in $nums) {
+    $e = $null
+    foreach ($x in $list) { if ([string]$x.n -eq [string]$n) { $e = $x } }
+    if (-not $e) { Write-Host ('  [X] No such number: ' + $n + ' (see /l)'); continue }
+    $out = Join-Path $dir $e.name; $k = 1
+    while (Test-Path -LiteralPath $out) { $out = Join-Path $dir ([string]$k + '_' + $e.name); $k++ }
+    $r = Call 'GET' ('/cli/api/dl?row=' + $e.id) $null $null $out
+    if ($r.c -eq 200 -and (Test-Path -LiteralPath $out)) { Write-Host ('  [OK] Saved: ' + $out + ' (' + (Get-Item -LiteralPath $out).Length + 'B)') }
+    else { Remove-Item -LiteralPath $out -ErrorAction SilentlyContinue; Write-Host ('  [X] Download failed: ' + $n + ' ' + $r.b) }
+  }
+}
+function Show-Help {
+  Write-Host 'text+Enter: send | /m: multi-line | /r: receive | /f path: send file'
+  Write-Host '/l: file list | /d no [no...]: download | /pwd: current folder | /h: help | /q: quit'
+}
+
+try {
+  $pin = $env:TG_PIN
+  if (-not $pin) { $pin = (New-Object Net.NetworkCredential('', (Read-Host 'PIN' -AsSecureString))).Password }
+  $r = Call 'POST' '/cli/api/login' ($U8.GetBytes([string]$pin)) $null $null 'text/plain; charset=utf-8'
+  $pin = $null
+  if ($r.c -ne 200) { Write-Host ('Login failed: ' + $r.b); return }
+  $H = @{ Authorization = 'Bearer ' + $r.b.Trim() }
+  $FL = @()
+  Write-Host ('Connected: ' + $W); Show-Help
+  while ($true) {
+    $line = Read-Host '>'
+    if ($null -eq $line) { break }
+    $line = $line.Trim()
+    if (-not $line) { continue }
+    $parts = @($line -split '\s+')
+    $cmd = $parts[0]
+    if ($cmd -ceq '/q') { break }
+    elseif ($cmd -ceq '/h') { Show-Help }
+    elseif ($cmd -ceq '/pwd') { Write-Host ('  ' + (Get-Location).ProviderPath) }
+    elseif ($cmd -ceq '/l') { $FL = Get-Files $true }
+    elseif ($cmd -ceq '/r') {
+      $r = Call 'GET' '/cli/api/inbox'
+      if ($r.c -eq 200) {
+        $has = $false
+        foreach ($ln in ($r.b -split $NL)) { if ($ln.TrimEnd([char]13) -eq '#FILES') { $has = $true } else { Write-Host $ln } }
+        if ($has) { $FL = Get-Files $true }
+      } else { Ok $r '' }
+    }
+    elseif ($cmd -ceq '/d') {
+      if ($parts.Count -lt 2) { $FL = Get-Files $true }
+      else {
+        if (@($FL).Count -eq 0) { $FL = Get-Files $false }
+        Save-Files $FL ($parts | Select-Object -Skip 1)
+      }
+    }
+    elseif ($cmd -ceq '/m') {
+      Write-Host '  Type or paste lines, then a line with only . to send'
+      $buf = New-Object Collections.Generic.List[string]
+      while ($true) { $l = Read-Host; if ($null -eq $l -or $l -eq '.') { break }; $buf.Add($l) }
+      $msg = ($buf -join $NL).Trim()
+      if (-not $msg) { Write-Host '  (cancelled)' } else { Send-Text $msg }
+    }
+    elseif ($cmd -ceq '/f') {
+      $f = $line.Substring(2).Trim()
+      if ($f.Length -ge 2 -and (($f[0] -eq [char]34 -and $f[-1] -eq [char]34) -or ($f[0] -eq [char]39 -and $f[-1] -eq [char]39))) { $f = $f.Substring(1, $f.Length - 2) }
+      if ($f -eq '~' -or $f.StartsWith('~/') -or $f.StartsWith('~\')) { $f = $HOME + $f.Substring(1) }
+      if (-not $f) { Write-Host '  Usage: /f path' }
+      else {
+        $full = $null
+        try { $full = (Resolve-Path -LiteralPath $f).ProviderPath } catch {}
+        if (-not $full -or -not (Test-Path -LiteralPath $full -PathType Leaf)) { Write-Host ('  File not found: ' + [char]39 + $f + [char]39) }
+        else {
+          # read-only open: -InFile in Windows PowerShell 5.1 opens the file for write (Access denied in System32)
+          $nm = [IO.Path]::GetFileName($full)
+          $len = (Get-Item -LiteralPath $full).Length
+          if ($len -gt 52428800) { Write-Host '  [X] File too large (max 50MB)' }
+          elseif ($len -eq 0) { Write-Host '  [X] Empty file' }
+          else {
+            $bytes = $null
+            try {
+              $fs = [IO.File]::Open($full, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+              try { $ms = New-Object IO.MemoryStream; $fs.CopyTo($ms); $bytes = $ms.ToArray() } finally { $fs.Dispose() }
+            } catch { Write-Host ('  [X] Cannot read: ' + $_.Exception.Message) }
+            if ($null -ne $bytes) {
+              $r = Call 'POST' ('/cli/api/sendfile?name=' + [Uri]::EscapeDataString($nm)) $bytes $null $null 'application/octet-stream'
+              Ok $r 'File sent'
+            }
+          }
+        }
+      }
+    }
+    elseif ($line -match '^[dlrfmhq](\s[\d\s]*)?$') { Write-Host ('  Not sent. Did you mean /' + $line + ' ? (commands start with /)') }
+    else { Send-Text $line }
+  }
+} finally {
+  if ($oldEnc) { try { [Console]::OutputEncoding = $oldEnc } catch {} }
+}
+}
+`;
 
 export default {
   async fetch(req, env) {
@@ -801,7 +959,7 @@ export default {
     if (p === "/favicon.ico" || p === "/robots.txt")
       return new Response(p === "/robots.txt" ? "User-agent: *\nDisallow: /\n" : null, { status: p === "/robots.txt" ? 200 : 204 });
 
-    if (p === "/cli" || p.startsWith("/cli/")) return handleCli(req, env, ip, url);   // 터미널용 CLI (Bearer 토큰, 웹 세션과 별개)
+    if (p === "/cli" || p.startsWith("/cli/") || p === "/cliwin" || p === "/powershell") return handleCli(req, env, ip, url);   // 터미널용 CLI (Bearer 토큰, 웹 세션과 별개)
 
     if (p === "/api/login" && req.method === "POST") return handleLogin(req, env, ip); if (p === "/api/auth/request" && req.method === "POST") return handleAuthRequest(req, env, ip, url); if (p === "/api/auth/status" && req.method === "GET") return handleAuthStatus(url, env); if (p === "/api/authhook" && req.method === "POST") return handleAuthHook(req, env);
 
@@ -809,6 +967,8 @@ export default {
       // 터미널(curl/wget)로 첫 화면을 열면 HTML 대신 CLI 사용법 (| bash 로 넘겨도 사용법만 출력)
       if (/^(curl|wget|httpie|xh)\//i.test(req.headers.get("User-Agent") || ""))
         return new Response(`# memo CLI: curl -s ${url.origin}/cli | bash\necho "memo CLI: curl -s ${url.origin}/cli | bash"\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
+      if (/PowerShell\//i.test(req.headers.get("User-Agent") || ""))   // irm https://<worker> | iex 로 열면 PowerShell 사용법
+        return new Response(`# memo CLI (PowerShell): irm ${url.origin}/cliwin | iex\nWrite-Host "memo CLI (PowerShell): irm ${url.origin}/cliwin | iex"\n`, { headers: { "Content-Type": "text/plain; charset=utf-8", ...SEC_HEADERS } });
       if (authed) return html(APP_HTML);
       const banUntil = Number(await kvGet(env, `ban:${ip}`) || 0);
       return html(LOGIN_HTML, banUntil > Date.now() / 1000 ? 429 : 200);
