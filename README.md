@@ -38,7 +38,7 @@
 | 🔒 PIN 로그인 | PIN 5회 실패 시 해당 IP 1시간 차단, 세션 12시간 |
 | 📱 텔레그램 승인 로그인 | "인증요청" → 내 텔레그램으로 온 메시지에서 [허가하기] → 짧은 임시 세션으로 입장 |
 | 🕶 임시 세션 제한 | 승인 로그인 세션에서는 저장된 기록을 보여주지 않고, 그 세션에서 새로 받은 메시지만 표시 |
-| ⌨️ 터미널(CLI) | `bash <(curl -s https://<주소>/cli)` 로 터미널에서 보내기·받기·파일 송수신 (기본 봇 ↔ 내 대화방) |
+| ⌨️ 터미널(CLI) | bash: `curl -s https://<주소>/cli \| bash`, PowerShell: `irm https://<주소>/cliwin \| iex` 로 터미널에서 보내기·받기·파일 송수신 (기본 봇 ↔ 내 대화방) |
 
 ---
 
@@ -247,6 +247,23 @@ curl -s https://memo.<서브도메인>.workers.dev/cli | bash
 
 - CLI 화면의 안내 문구는 영어로 표시됩니다.
 - 반드시 `https://` 주소를 쓰세요. `http://` 로 받으면 스크립트 대신 https 주소 안내만 출력됩니다.
+
+#### Windows PowerShell
+
+```powershell
+irm https://memo.<서브도메인>.workers.dev/cliwin | iex
+# /powershell 경로도 같은 스크립트입니다
+```
+
+- Windows PowerShell 5.1 과 PowerShell 7 에서 동작합니다. 명령은 bash 버전과 같습니다.
+- 다른 점
+  - `/m` 여러 줄 입력은 **`.` 한 글자만 있는 줄**로 끝냅니다. (PowerShell 에는 Ctrl+D 가 없음)
+  - 입력창에서 Tab 자동완성은 되지 않습니다.
+  - 성공/실패 표시는 `[OK]` / `[X]` 입니다.
+- 스크립트 전체가 `& { ... }` 안에서 실행되므로 끝난 뒤 변수·함수가 PowerShell 창에 남지 않고, `/q` 로 나가도 창은 닫히지 않습니다.
+- PIN 은 `****` 로 가려져 입력됩니다. `$env:TG_PIN` 이 있으면 그 값을 사용합니다.
+- 관리자 PowerShell 은 시작 폴더가 `C:\Windows\system32` 이므로, `/d` 로 받기 전에 `cd ~\Downloads` 처럼 폴더를 옮기세요. (`/pwd` 로 확인)
+- 주소를 잊었다면 `irm https://memo.<서브도메인>.workers.dev | iex` 를 실행하면 위 사용법이 출력됩니다.
 - `d 2` 처럼 `/` 를 빼고 명령 모양으로 입력하면 전송하지 않고 `Did you mean /d 2 ?` 라고 알려 줍니다.
 - `/r` 로 받은 메시지는 **모두 서버(D1)에 저장**되므로, 웹(PIN 로그인)에서도 기록으로 보입니다.
   단, 텔레그램은 봇마다 받은 메시지 대기열이 하나라서 **CLI에서 먼저 받은 메시지는 웹의 🔄로 다시 받을 수 없습니다.** (승인 로그인 임시 세션에서는 보이지 않음)
@@ -319,6 +336,7 @@ curl -s https://memo.<서브도메인>.workers.dev/cli | bash
 | `/api/history?bot=` | GET | ✅ | 서버 저장 기록 (임시 세션은 빈 목록) |
 | `/api/delete` | POST | ✅ | 메시지·대화방 기록 삭제 |
 | `/cli` | GET | – | 터미널용 bash 스크립트 (비밀값 없음) |
+| `/cliwin` · `/powershell` | GET | – | PowerShell 스크립트 (비밀값 없음) |
 | `/cli/api/login` | POST | – | PIN 확인 → CLI 토큰 발급 (본문 = PIN) |
 | `/cli/api/send` | POST | CLI | 텍스트 전송 (본문 = 텍스트) |
 | `/cli/api/sendfile?name=` | POST | CLI | 파일 전송 (본문 = 파일, 스트리밍) |
